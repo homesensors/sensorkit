@@ -1,0 +1,22 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Firmware bug or question (STM32WB09 / BTHome / ACK protocol)
+    url: https://github.com/homesensors/firmware/issues/new
+    about: |
+      File on the firmware repo if your issue is about MCU code, BLE radio
+      behaviour, LPM, the AckBuf, or anything that runs on the device.
+  - name: Hardware / PCB / schematic issue
+    url: https://github.com/homesensors/hardware/issues/new
+    about: |
+      File on the hardware repo for KiCad project bugs, BOM questions,
+      fab/assembly issues, or PCB revision proposals.
+  - name: Home Assistant add-on / daemon issue
+    url: https://github.com/homesensors/homeassist/issues/new
+    about: |
+      File on the homeassist repo for ACK daemon bugs, HA integration
+      problems, BlueZ / bluetoothctl issues on the HA side.
+  - name: Cross-cutting / architecture / protocol question
+    url: https://github.com/homesensors/sensorkit/issues/new?template=cross-cutting.md
+    about: |
+      File here if your issue touches multiple repos or is about the
+      protocol spec, build guide, or kit-level design decisions.

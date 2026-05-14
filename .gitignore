@@ -1,0 +1,12 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Image working files (we commit only the optimised/final ones in docs/images/)
+*.xcf
+*.psd
+*.afdesign
