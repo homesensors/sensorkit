@@ -1,5 +1,10 @@
 # HomeSensors — `sensorkit`
 
+[![Docs License: CC BY-SA 4.0](https://img.shields.io/badge/Docs%20License-CC%20BY--SA%204.0-lightgrey.svg)](LICENSE)
+[![Firmware: MIT](https://img.shields.io/badge/Firmware-MIT-yellow.svg)](https://github.com/homesensors/firmware/blob/main/LICENSE)
+[![Hardware: CERN--OHL--P--2.0](https://img.shields.io/badge/Hardware-CERN--OHL--P--2.0-blue.svg)](https://github.com/homesensors/hardware/blob/main/LICENSE)
+[![HA add-on: MIT](https://img.shields.io/badge/HA%20add--on-MIT-yellow.svg)](https://github.com/homesensors/homeassist/blob/main/LICENSE)
+
 > Open-hardware, open-firmware DIY smart-home sensor kit. Pre-configured for
 > Home Assistant. Native BTHome v2 over BLE today; Zigbee / LoRa / Wi-Fi
 > variants planned. Goal: a workable smart home in minutes, without
@@ -118,7 +123,7 @@ v0.1.0 release tag.
 | HA add-on (`homesensors/homeassist`) | MIT |
 | Docs in this repo | CC-BY-SA 4.0 |
 
-See [`LICENSE-summary.md`](LICENSE-summary.md) for full text references.
+See [`LICENSING.md`](LICENSING.md) for full text references.
 
 ## Contributing
 
