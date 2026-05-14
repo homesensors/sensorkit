@@ -1,9 +1,18 @@
 # Modular architecture specification
 
-> **Status: DRAFT 0.1.** Proposed architecture, not yet binding.
+> **Status: DRAFT 0.2.** Proposed architecture, not yet binding.
 > Intended to be redlined and refined into a `modular-spec-v1.0` tag
 > before any hardware committed to fab follows it. All design decisions
 > below are subject to revision based on bring-up evidence.
+>
+> *Changes since DRAFT 0.1:* ADR-1 power topology now supports
+> multi-cell LiIon (1S–6S) batteries up to a 24 V VIN_RAW ceiling,
+> implemented as two regulator footprints with per-SKU DNP. §3.4 open
+> questions closed (extension owns its power management). ADR-5 added
+> for the implementation-language choice (C++17 across the framework).
+> Sensor categories expanded from two to three (DISCRETE / BATCH /
+> STREAMING). SensorObject interface extended with `read_frame()` for
+> streaming data movement. §7.3 streaming-flow specified concretely.
 
 This document specifies the modular evolution of `sensorkit` from a
 single fixed-purpose door sensor into a kit-style platform supporting
@@ -34,8 +43,10 @@ Cross-references between them are by stable section anchors.
   PHY-specific stacks, so a new sensor type only requires a new driver
   + a one-line registration, not a full firmware fork.
 - An **upstream protocol matrix** that routes discrete events
-  (door, motion, temperature) onto BTHome-like channels and streaming
-  data (audio, video, vibration FFT) onto MQTT-like channels.
+  (door, motion), batched samples (temperature, humidity), and
+  streaming data (audio, video, vibration FFT) onto the appropriate
+  transport for each m/b's PHY (BTHome v2 for BLE-friendly payloads,
+  MQTT for everything else).
 
 ### 1.2 Out of scope
 
@@ -44,9 +55,9 @@ Cross-references between them are by stable section anchors.
   retain their mikroBUS roles across all m/b variants. Different
   extensions plug into the same pins; pin function is statically
   bound to extension type via firmware config (see §5 ADR-3).
-- **Code generation tooling.** Firmware is hand-written C with
-  framework support; no GUI / IDE plugin generates the firmware for a
-  given assembly.
+- **Code generation tooling.** Firmware is hand-written C++ (see
+  ADR-5 in §8) with framework support; no GUI / IDE plugin generates
+  the firmware for a given assembly.
 - **Multiple extensions per motherboard.** Each m/b carries a single
   extension socket in v1.0. A "carrier board" that fans one m/b
   connector into multiple extension sockets is a possible v2 addition
@@ -69,81 +80,111 @@ Cross-references between them are by stable section anchors.
    only to detect *wrong* extensions (red-LED behaviour), not to
    support truly heterogeneous deployments without firmware rebuild.
 4. **Reuse established standards.** mikroBUS for connector,
-   BTHome v2 + MQTT for upstream protocols, JST-MX / JST-SH for
-   compact form factors. No invented connectors, no invented wire
-   formats, no proprietary handshakes unless absolutely necessary.
+   BTHome v2 + MQTT for upstream protocols, JST-SH for the compact
+   form factor. No invented connectors, no invented wire formats, no
+   proprietary handshakes unless absolutely necessary.
 
 ## 2. System block diagram
 
 ```
-   ┌─────────────────────────────────────────────────────────────┐
-   │                     MOTHERBOARD                              │
-   │                                                              │
-   │   Power input                                                │
-   │   options:                                                   │
-   │   - CR2032 (DNP) ──┐                                         │
-   │   - USB-C 5V  (DNP)├─▶ wide-input ──▶ 3V3_BUS                │
-   │   - DC 5-24V  (DNP)│   buck-boost     ▲                      │
-   │                    │   regulator      │                      │
-   │            VIN_RAW ┴──────────────────┼────┐                 │
-   │                                       │    │                 │
-   │   ┌───────────────────┐  ┌────────────┴───┐│                 │
-   │   │  PHY MCU          │  │ Status LED     ││                 │
-   │   │  - STM32WB09 BLE  │  │ (heartbeat,    ││                 │
-   │   │  - ESP32 WiFi     │  │  state, error) ││                 │
-   │   │  - EFR32MG24 Zig  │  └────────────────┘│                 │
-   │   │  - STM32WLE5 LoRa │                    │                 │
-   │   │                   │                    │                 │
-   │   │  GPIO/I2C/SPI ────┤◀───── EXTENSION CONNECTOR (mikroBUS)│
-   │   │                   │       3V3 │ VIN_RAW │ GND │ INT │ … │
-   │   │  ADC ────────────►│         AN│ RST│ CS│ SCK│MISO│ MOSI│
-   │   │  (ID-resistor)    │          │ SDA│SCL│ TX │ RX │ PWM │ │
-   │   └───────────────────┘                                     │
-   └─────────────────────────────────────────────────────────────┘
+   ┌──────────────────────────────────────────────────────────────┐
+   │                     MOTHERBOARD                               │
+   │                                                               │
+   │   Power input options (one populated per SKU):                │
+   │   - CR2032 (2.0-3.0 V)         ──┐                            │
+   │   - 1S LiIon (3.0-4.2 V)       ──┤                            │
+   │   - USB-C (5 V)                ──┤   ┌────────────────────┐   │
+   │   - 2S-6S LiIon (6.0-24 V)     ──┼──▶│ Regulator (one of 2│   │
+   │   - DC barrel jack (5-24 V)    ──┘   │ footprints, DNP'd):│   │
+   │                                       │  A) low-V boost    │   │
+   │                            VIN_RAW ──▶│     (≤5.5V in)     │   │
+   │                                       │  B) wide buck-boost│   │
+   │                                       │     (≤30V in)      │   │
+   │                                       └───────┬────────────┘   │
+   │                                               │ 3V3_BUS       │
+   │                                               ▼               │
+   │   ┌───────────────────┐  ┌──────────────────────────────────┐  │
+   │   │  PHY MCU          │  │ Status LED (heartbeat/state/err) │  │
+   │   │  - STM32WB09 BLE  │  └──────────────────────────────────┘  │
+   │   │  - ESP32 WiFi     │                                        │
+   │   │  - EFR32MG24 Zig  │                                        │
+   │   │  - STM32WLE5 LoRa │                                        │
+   │   │                   │                                        │
+   │   │  GPIO/I2C/SPI ────┤◀───── EXTENSION CONNECTOR (mikroBUS) ─│
+   │   │                   │       3V3 │ VIN_RAW │ GND │ INT │ …   │
+   │   │  ADC ────────────►│        AN│RST│CS│SCK│MISO│MOSI│SDA│… │
+   │   │  (ID-resistor)    │                                       │
+   │   └───────────────────┘                                       │
+   └──────────────────────────────────────────────────────────────┘
                               │
                               │ (mikroBUS 16-pin)
                               ▼
-   ┌─────────────────────────────────────────────────────────────┐
-   │                     EXTENSION (one of N)                     │
-   │                                                              │
-   │   Power: 3V3 and/or VIN_RAW from m/b                         │
-   │                                                              │
-   │   ┌──────────────────────────────────────────────┐           │
-   │   │ Simple extension (door, magnet, temperature):│           │
-   │   │   sensor IC → SDA/SCL or GPIO → connector    │           │
-   │   │   ID resistor (1) → AN pin                   │           │
-   │   └──────────────────────────────────────────────┘           │
-   │                       OR                                     │
-   │   ┌──────────────────────────────────────────────┐           │
-   │   │ Smart extension (audio, video, FFT, NN):     │           │
-   │   │   companion MCU + multiple sensors           │           │
-   │   │   companion MCU ↔ m/b over SPI or UART       │           │
-   │   │   edge processing on companion MCU           │           │
-   │   │   m/b only sees pre-processed data           │           │
-   │   └──────────────────────────────────────────────┘           │
-   └─────────────────────────────────────────────────────────────┘
+   ┌──────────────────────────────────────────────────────────────┐
+   │                     EXTENSION (one of N)                      │
+   │                                                               │
+   │   Power: 3V3 and/or VIN_RAW from m/b. Extension owns any      │
+   │   further regulation (LDO, boost, buck) it needs.             │
+   │                                                               │
+   │   ┌──────────────────────────────────────────────┐            │
+   │   │ Simple extension (door, magnet, temperature):│            │
+   │   │   sensor IC → SDA/SCL or GPIO → connector    │            │
+   │   │   ID resistor (1) → AN pin                   │            │
+   │   └──────────────────────────────────────────────┘            │
+   │                       OR                                      │
+   │   ┌──────────────────────────────────────────────┐            │
+   │   │ Smart extension (audio, video, FFT, NN):     │            │
+   │   │   companion MCU + multiple sensors           │            │
+   │   │   companion MCU ↔ m/b over SPI or UART       │            │
+   │   │   edge processing on companion MCU           │            │
+   │   │   m/b only sees pre-processed frames         │            │
+   │   └──────────────────────────────────────────────┘            │
+   └──────────────────────────────────────────────────────────────┘
 ```
 
 ## 3. ADR-1: Power topology
 
 ### 3.1 Decision
 
-The motherboard uses a **wide-input buck-boost switching regulator**
-(e.g. TI TPS63802 family, 0.7–5.5 V input → fixed 3.3 V output, ~100 nA
-quiescent). The same regulator and same PCB serve both battery-powered
-and mains-powered assemblies via DNP-controlled population of the three
-input options:
+The motherboard supports **any power input from 2.0 V to 24 V** on the
+`VIN_RAW` rail, via **two regulator footprints on the same PCB** —
+exactly one is populated per assembled SKU:
 
-| Input | Voltage range | Use case | Populated for |
-|---|---|---|---|
-| CR2032 socket | ~2.0–3.0 V | Battery, autonomous | Door, window, magnetic, leak |
-| USB-C connector | 5 V | Mains, mounted | Audio, video, persistent monitors |
-| DC barrel jack | 5–24 V | Industrial / vehicle | Voltage/current meters, fire panels |
+| Footprint | Input range | Class | Example part | Iq | Populated for |
+|---|---|---|---|---|---|
+| **A** — Low-V boost | 0.7 – 5.5 V | Synchronous boost | TI TPS63802 family | ~100 nA | CR2032 / 1S LiIon — battery-only SKUs |
+| **B** — Wide buck-boost | 4.5 – 30 V | Buck-boost | LT8390, LM5176, similar | ~25–50 µA | USB / DC barrel / 2S–6S LiIon — mains or multi-cell SKUs |
 
-Only one input is populated per assembled motherboard SKU. The
-regulator selects automatically because all three feed `VIN_RAW`
-through an ideal-OR diode controller (or a simple Schottky OR for
-cost-down variants).
+Both footprints sit on the same PCB tracks; the unpopulated footprint's
+pads are simply left bare on the assembly. Output of either regulator
+ties into the same `3V3_BUS` net. This way **the m/b PCB is a single
+SKU at fab time**; the battery vs. mains distinction is solely a
+stuffing-list choice.
+
+`VIN_RAW` accepts up to **24 V nominal** input. This range covers:
+
+| Source class | Voltage range | Suitable footprint |
+|---|---|---|
+| CR2032 coin cell | 2.0 – 3.0 V | A |
+| 1S LiIon (single cell) | 3.0 – 4.2 V | A |
+| USB-C VBUS | 5 V | A or B (both work; B for headroom) |
+| 2S LiIon | 6.0 – 8.4 V | B |
+| 3S LiIon | 9.0 – 12.6 V | B |
+| 4S LiIon | 12.0 – 16.8 V | B |
+| 5S LiIon | 15.0 – 21.0 V | B |
+| 6S LiIon | 18.0 – 25.2 V * | B |
+| DC barrel jack | 5 – 24 V | A (≤5 V) or B (>5 V) |
+
+\* 6S full-charge voltage is 25.2 V, marginally above the 24 V nominal
+spec. The wide buck-boost footprint must tolerate brief transients up
+to 30 V (and we should pick parts accordingly), but extensions plugged
+into `VIN_RAW` should be designed assuming 24 V worst-case typical.
+
+Only one input option is populated per assembled motherboard SKU
+(through-hole CR2032 socket, USB-C connector, or DC barrel jack —
+mutually exclusive). The selected input feeds `VIN_RAW` through an
+ideal-OR diode controller (or a simple Schottky OR for cost-down
+variants) so that, if multiple inputs were stuffed, the highest one
+would win.
 
 `VIN_RAW` is exposed on the extension connector alongside `3V3`. The
 extension can draw from either rail, depending on what its sensors
@@ -152,22 +193,21 @@ need.
 ### 3.2 Rationale
 
 Requirement #6 ("low-energy autonomous or high-consumption mains
-configuration with the *same exact* main board") rules out fixed-
-topology LDO designs. A wide-input switching regulator with ~100 nA
-quiescent is the only architecture that hits both extremes from one
-silicon part:
+configuration with the *same exact* main board") rules out any
+fixed-topology single-regulator design. A practical analysis of
+available silicon shows that **no single buck-boost part covers the
+full 0.7 V → 24 V input range** with quiescent current low enough for
+battery operation:
 
-- Battery side: ~2.4 V cell input → 3.3 V output. Boost mode. LDO
-  cannot drop "up", so an LDO-only design would force a per-variant
-  m/b SKU.
-- Mains side: 5–24 V → 3.3 V. Buck mode. An LDO would waste up to
-  90 % as heat at high input.
+- Sub-5.5 V buck-boost parts (TPS63802 class) achieve ~100 nA Iq but
+  cannot accept the multi-cell LiIon or DC-barrel inputs.
+- Wide-input parts (LT8390, LM5176 class) accept up to 30 V or more
+  but quiescent jumps to 25–50 µA — acceptable for mains-powered
+  builds, fatal for CR2032 battery builds.
 
-The cost is ~30–50 µA worst-case quiescent vs. ~1.5 µA for an LDO,
-which is a worse battery-life number for battery variants but still
-yields a ~1-year CR2032 lifetime with current homesensors firmware
-power budget. Tier B LPM (full STOP between events) recovers most of
-that gap.
+The two-footprint, one-PCB approach gives the best of both: shared
+PCB tooling and BOM management, while letting each SKU pick the
+regulator silicon optimal for its power-source class.
 
 ### 3.3 Extension power contract
 
@@ -181,16 +221,27 @@ The "5V" label on mikroBUS pin 10 is preserved for ecosystem
 compatibility with off-the-shelf Click boards designed for USB-host
 m/bs, but documented to track VIN_RAW on homesensors m/bs.
 
-### 3.4 Open questions for v1.0
+### 3.4 Extension power management
 
-- **Load switching on the extension supply.** Should the m/b be able
-  to power the extension down between samples (for ultra-low-power
-  configurations with infrequent polling)? Adds one load-switch IC
-  + one GPIO. Decide once we have a worst-case extension power
-  budget.
-- **Buck-boost vs. boost-only at battery side.** A boost-only part
-  is cheaper and lower-quiescent but can't accept >3.3 V input on
-  the battery rail. Acceptable if CR2032 is the only battery option.
+**The extension owns its power management.** The m/b does not gate the
+extension's supply at any sub-second granularity — there is no
+load-switch on the `3V3` or `VIN_RAW` rails leaving the m/b. If an
+extension needs to power down sub-components between samples (e.g.
+the analog front-end of a battery-budget temperature sensor), the
+extension provides its own load switch driven by its own logic.
+
+**Compile-time validation:** the firmware framework knows the
+configured power class of the m/b (`battery_LP`, `battery_LiIon`,
+`mains_USB`, `mains_DC`) and the worst-case current draw declared by
+each extension driver. Combinations that violate the budget — e.g.
+configuring a video-stream extension on a CR2032 m/b — cause a
+compile-time error, not a silent runtime failure. The error is
+explicit ("extension `video_stream` declares 80 mA continuous, exceeds
+`battery_LP` budget of 0.5 mA").
+
+This pushes the "is this combination safe?" question to build time,
+where it can be answered statically, rather than to a runtime check
+that the deployed device must perform on every boot.
 
 ## 4. ADR-2: Physical connector
 
@@ -283,9 +334,22 @@ with another extension type using those pins.
 Per mikroBUS spec §3.3: the motherboard carries the **female** socket
 on the top side; the extension carries the **male** header on the
 bottom side; extensions mount with components facing up (away from
-m/b). For low-profile assemblies, surface-mount sockets such as Würth
-692121710002 (1.8 mm seated height) are acceptable substitutes for
-through-hole.
+m/b).
+
+For low-profile assemblies, surface-mount mezzanine sockets such as
+the Würth Elektronik **WR-MM** family (e.g. 692121710002 and related
+part numbers) are acceptable substitutes for through-hole. The
+WR-MM family is mikroBUS-compatible (2.54 mm pitch, 2×8 layout) and
+available in multiple mating-height variants. The specific stacking
+height, mounting type (THT vs SMT), and current rating must be
+verified against the manufacturer's datasheet before BOM-locking a
+particular variant — Würth lists the data sheet on
+[`https://www.we-online.com/en/components`](https://www.we-online.com/en/components)
+under part-number search.
+
+Functionally-equivalent alternatives include Samtec SSW-108-01-T-D
+(standard through-hole, ~8 mm mated) and Mill-Max 851-43-016-10-001000
+(SMT, low profile).
 
 ## 5. ADR-3: Identification
 
@@ -332,7 +396,8 @@ extensions, e.g.), or marketing SKUs without firmware fork.
 
 ### 5.3 Boot-time behaviour
 
-Pseudocode (canonical reference in firmware framework):
+Pseudocode (canonical reference in firmware framework; expressed here
+in C, but the framework reference implementation uses C++ per ADR-5):
 
 ```c
 extension_id_t extension_detect(void)
@@ -366,26 +431,27 @@ void boot(void) {
 
 Bands chosen to give ≥100 mV margin between adjacent values at 12-bit
 ADC resolution with 1 % tolerance resistors and 33 kΩ pull-up. Values
-are 5 % E24 series for sourcing simplicity.
+are 5 % E24 series for sourcing simplicity. Category abbreviations:
+**D** = DISCRETE, **B** = BATCH, **S** = STREAMING (see §7.4).
 
-| ID slot | `R_id` (Ω) | Mid-band V (V) | Reserved for |
-|---|---|---|---|
-| 0 | open (no R) | ~3.30 | UNKNOWN / unplugged |
-| 1 | 100 k | 2.49 | Door/window (Hall, I2C) — *current sensorkit door* |
-| 2 | 56 k | 2.07 | Magnet field (3-axis) |
-| 3 | 33 k | 1.65 | PIR motion |
-| 4 | 22 k | 1.32 | Temperature/humidity (I2C) |
-| 5 | 15 k | 1.03 | Leak (resistive probe) |
-| 6 | 10 k | 0.77 | Fire/smoke |
-| 7 | 6.8 k | 0.56 | Audio stream (companion MCU, UART) |
-| 8 | 4.7 k | 0.41 | Video stream (companion MCU, SPI) |
-| 9 | 3.3 k | 0.30 | Vibration / FFT (companion MCU, SPI) |
-| 10 | 2.2 k | 0.21 | Power monitoring (voltage/current ADC) |
-| 11 | 1.5 k | 0.14 | reserved |
-| 12 | 1.0 k | 0.097 | reserved |
-| 13 | 680 | 0.067 | reserved |
-| 14 | 470 | 0.046 | reserved |
-| 15 | 0 (short) | 0.000 | TEST / development |
+| ID slot | `R_id` (Ω) | Mid-band V (V) | Category | Reserved for |
+|---|---|---|---|---|
+| 0 | open (no R) | ~3.30 | — | UNKNOWN / unplugged |
+| 1 | 100 k | 2.49 | D | Door/window (Hall, I2C) — *current sensorkit door* |
+| 2 | 56 k | 2.07 | D | Magnet field (3-axis) |
+| 3 | 33 k | 1.65 | D | PIR motion |
+| 4 | 22 k | 1.32 | B | Temperature/humidity (I2C) |
+| 5 | 15 k | 1.03 | D | Leak (resistive probe) |
+| 6 | 10 k | 0.77 | D | Fire/smoke |
+| 7 | 6.8 k | 0.56 | S | Audio stream (companion MCU, UART) |
+| 8 | 4.7 k | 0.41 | S | Video stream (companion MCU, SPI) |
+| 9 | 3.3 k | 0.30 | B | Vibration / FFT summary (companion MCU, SPI) |
+| 10 | 2.2 k | 0.21 | B | Power monitoring (voltage/current ADC) |
+| 11 | 1.5 k | 0.14 | — | reserved |
+| 12 | 1.0 k | 0.097 | — | reserved |
+| 13 | 680 | 0.067 | — | reserved |
+| 14 | 470 | 0.046 | — | reserved |
+| 15 | 0 (short) | 0.000 | — | TEST / development |
 
 Slots 11–14 are unassigned and available for future extension types.
 Slot 15 (short to GND) is reserved for development boards and bench
@@ -415,8 +481,9 @@ reset the extension's companion MCU (if any) or to reset the
 extension's analog front-end on boot.
 
 `RST` is NOT a wake-up channel for the extension. Extensions with
-companion MCUs that need to be powered-up-then-down by the m/b should
-use the load-switch mechanism flagged as a v1.0 open question in §3.4.
+companion MCUs that need their own power-down sleep between events
+should implement that sleep internally (consistent with §3.4 —
+extension owns its power management).
 
 ### 6.2 Rationale
 
@@ -432,17 +499,8 @@ use the load-switch mechanism flagged as a v1.0 open question in §3.4.
 
 The m/b firmware framework MUST register the INT pin as an
 EXTI-capable wake-up source whenever an extension driver is loaded.
-Drivers declare their preferred edge:
-
-```c
-typedef struct {
-    extension_id_t id;
-    int_edge_t int_edge;  // EXTI_RISING, EXTI_FALLING, EXTI_BOTH
-    sensor_init_fn init;
-    sensor_event_fn on_event;
-    /* ... */
-} sensor_driver_t;
-```
+Drivers declare their preferred edge as part of their `SensorObject`
+registration (see §7.2).
 
 ## 7. Firmware framework
 
@@ -454,16 +512,17 @@ typedef struct {
    │  - main loop, LPM gate, system housekeeping                 │
    ├────────────────────────────────────────────────────────────┤
    │  Upstream protocol adapter                                  │
-   │  - routes events to BTHome (discrete) or MQTT (streaming)   │
+   │  - routes events per category to BTHome / MQTT / Zigbee     │
    │  - Tier 1.5 ACK overlay for BTHome (current homesensors)    │
    ├────────────────────────────────────────────────────────────┤
    │  Sensor framework — `SensorObject` interface                │
-   │  - generic lifecycle: register / init / poll / on_int / shutdown
-   │  - generic data types: Event, Sample, Stream                │
+   │  - generic lifecycle: init / poll / on_int / read_frame /   │
+   │    publish / shutdown                                       │
+   │  - generic data types: Event, Sample, Frame                 │
    │  - extension-driver registration table                      │
    ├────────────────────────────────────────────────────────────┤
    │  Extension drivers (one per ID slot)                        │
-   │  - door_contact.c, motion_pir.c, temp_humidity.c, ...       │
+   │  - door_contact, motion_pir, temp_humidity, audio_stream … │
    ├────────────────────────────────────────────────────────────┤
    │  Hardware abstraction layer (HAL)                           │
    │  - mikroBUS pin services: I2C, SPI, UART, GPIO, ADC, EXTI   │
@@ -484,11 +543,16 @@ is deliberately small — enough to express the lifecycle of a sensor
 event but not so large that adding a new sensor type requires
 understanding the whole framework.
 
+The protocol-level interface is shown here as a C struct for spec
+clarity; the v0.2 reference implementation expresses this as a C++
+abstract base class with virtual methods, per ADR-5 (§8).
+
 ```c
 typedef struct sensor_object_s {
     /* Identity (filled by framework from ID-resistor lookup) */
-    extension_id_t  id;
-    const char     *name;
+    extension_id_t       id;
+    const char          *name;
+    sensor_category_t    category;     /* DISCRETE | BATCH | STREAMING */
 
     /* Lifecycle */
     void   (*init)(struct sensor_object_s *self);
@@ -496,71 +560,204 @@ typedef struct sensor_object_s {
     void   (*on_int)(struct sensor_object_s *self);   /* may be NULL */
     void   (*shutdown)(struct sensor_object_s *self);
 
-    /* Upstream presentation */
-    sensor_category_t  category;  /* DISCRETE or STREAMING */
-    void  (*publish)(struct sensor_object_s *self, sensor_event_t *evt);
+    /* Discrete + Batch publish path — driver calls into framework */
+    void   (*publish)(struct sensor_object_s *self, sensor_event_t *evt);
 
-    /* Driver-private state — opaque to framework */
+    /* Streaming + Batch frame-fetch path — framework calls into driver.
+     * NULL for DISCRETE-only drivers. Returns bytes written, 0 if no
+     * frame ready. Typically initiates a DMA transfer over SPI/UART. */
+    size_t (*read_frame)(struct sensor_object_s *self,
+                         uint8_t *buf, size_t buf_max);
+
+    /* Maximum frame size this sensor can produce. Framework allocates
+     * one buffer of this size per active stream. 0 for DISCRETE. */
+    size_t  max_frame_bytes;
+
+    /* INT-pin edge preference. */
+    int_edge_t int_edge;   /* EXTI_RISING | EXTI_FALLING | EXTI_BOTH */
+
+    /* Driver-private state — opaque to framework. */
     void   *priv;
 } sensor_object_t;
 ```
 
-Two lifecycle modes are supported:
+Three lifecycle modes are supported, mapping onto the three sensor
+categories (see §7.4):
 
-1. **Polled mode**: framework calls `poll()` every N ms (configurable
-   per driver). Driver decides whether to publish based on what it
-   reads. Suitable for slow-changing sensors (temperature, leak).
-2. **Interrupt mode**: framework calls `on_int()` when the INT pin
-   fires. Driver reads sensor over I2C/SPI, decides whether to
-   publish. Suitable for event-driven sensors (door, motion).
+1. **Polled** (DISCRETE samples, BATCH summaries): framework calls
+   `poll()` every N ms. Driver decides what to publish.
+2. **Interrupt-event** (DISCRETE events): framework calls `on_int()`
+   when the INT pin fires. Driver reads the sensor, emits an event.
+3. **Interrupt-frame** (BATCH frames, STREAMING): framework calls
+   `on_int()` to *acknowledge a frame is ready*, then later calls
+   `read_frame()` from the framework's stream thread to fetch it.
+   Drives the data flow specified in §7.3.
 
-Both modes can co-exist within one driver (e.g. door sensor uses INT
-for events + polls battery percent every minute).
+A driver may use multiple modes (e.g. a door sensor uses
+interrupt-event for door state + polled for battery percent every
+minute).
 
-### 7.3 Streaming extension support
+### 7.3 Streaming and batched data flow
 
-For extensions with companion MCUs producing continuous data (audio,
-video, vibration FFT):
+For extensions producing frame-structured data (BATCH and STREAMING
+categories), the flow is:
 
-- The companion MCU runs the sensor-specific DSP locally and presents
-  a *summary* or a *frame* to the m/b over the high-speed bus
-  (typically SPI, optionally UART for narrow-bandwidth).
-- The m/b's SensorObject driver consumes the framed data and publishes
-  it via the **streaming** path (MQTT or analogous protocol —
-  PHY-specific).
-- BTHome is NOT used for streaming data. BTHome's per-advert payload
-  cap is too tight for continuous data.
+```
+   1. Companion MCU on extension prepares a frame in its local buffer.
+   2. Companion MCU asserts INT pin.
+   3. Framework EXTI handler dispatches driver's on_int() ── ISR context
+      └─ driver's on_int() flags "frame ready", returns immediately.
+   4. Framework's stream thread (preemptible, lower priority) sees the
+      flag, allocates a buffer of size sensor.max_frame_bytes from a
+      pre-reserved pool, and calls driver's read_frame(buf, buf_max).
+   5. read_frame() initiates the SPI or UART DMA transfer that pulls
+      the frame from the companion MCU into the supplied buffer.
+      Returns when DMA completes; returns the byte count written.
+   6. Framework hands the buffer to the upstream protocol adapter via
+      publish_frame(buf, len). The adapter chooses BTHome (for small
+      BATCH frames on BLE) or MQTT (everything else) and emits.
+   7. Framework returns the buffer to the pool.
+```
 
-The category split (`DISCRETE` vs `STREAMING`) in the SensorObject
-interface lets the upstream protocol adapter route data to the right
-channel automatically. The extension driver doesn't know or care
-which PHY is below it.
+This separation has three important properties:
 
-## 8. Upstream protocol matrix
+- `on_int()` is cheap (ISR-time). LPM wake latency stays low.
+- Buffer lifecycle is framework-owned (pool allocation, not malloc).
+  Predictable for embedded RTOS / bare-metal.
+- The upstream adapter is the only place that knows which transport
+  to use. Drivers are PHY-agnostic.
 
-| Sensor category | Examples | Protocol over BLE m/b | Protocol over Wi-Fi/Zigbee m/b |
+For polled-streaming (rare — only when the companion MCU lacks an
+INT line), the framework's polled tick simply calls `read_frame()`
+directly with a NULL `on_int()`. Same downstream flow.
+
+### 7.4 Sensor categories
+
+Three categories cover the full range of payload sizes and rates:
+
+| Category | Payload size | Rate | Examples | Buffer model |
+|---|---|---|---|---|
+| **DISCRETE** | 1–32 bytes | sporadic (event-driven) or slow-periodic (≤1 Hz) | Door, motion, leak, fire | Stack-local `sensor_event_t`. No frame buffer. |
+| **BATCH** | 32–512 bytes | periodic (1–10 Hz typically) | Temperature/humidity summary, vibration FFT, power-monitor sample | Single pool buffer per stream, sized to `max_frame_bytes`. |
+| **STREAMING** | 512 bytes – 16 kB | continuous (10 Hz – 100 kHz frame rate) | Audio PCM, low-res video, raw IMU stream | Ring of pool buffers, multi-frame in flight under flow control. |
+
+Driver declares its category at registration time. The framework's
+upstream adapter uses the category to choose transport (§9). The
+m/b's PHY may statically refuse certain categories at compile time
+(e.g. BLE m/b rejects STREAMING — see §9).
+
+DISCRETE and BATCH can both publish via the BTHome transport on BLE
+m/bs. BATCH adverts are larger (a full advert per sample, up to the
+31-byte legacy cap) and fire less often than the rate suggests — the
+framework collects multiple values into one advert where possible.
+
+## 8. ADR-5: Implementation language
+
+### 8.1 Decision
+
+The firmware framework, extension drivers, upstream-protocol adapters,
+and application layer are written in **C++17**, using a conservative
+embedded-C++ subset:
+
+- **`-fno-exceptions`** — no exception unwinding overhead.
+- **`-fno-rtti`** — no runtime type information; no `dynamic_cast`,
+  no `typeid`.
+- **`-fno-threadsafe-statics`** — function-local statics are
+  initialised once at startup in controlled order, not under
+  thread-safety locks.
+- No standard library use of `<iostream>`, `<thread>`, dynamic
+  `<memory>` (smart-pointers that allocate). Use **ETL** (Embedded
+  Template Library, `https://www.etlcpp.com/`) for containers and
+  fixed-size collections.
+- No runtime heap allocation after `setup()` completes. All allocation
+  is pool-based and capped at boot.
+- `constexpr` used liberally for build-time computation (lookup
+  tables, calibration constants, pin maps).
+- Templates used for type-safe HAL wrappers (e.g. `Gpio<Port::B, 1>`)
+  but kept finite — no recursive templates that explode object code.
+
+Vendor HAL adapters (the thin layer that wraps STM32Cube, ESP-IDF,
+Gecko SDK, etc.) remain in C, exposed to C++ via `extern "C"`
+headers. The framework layer is the first C++ layer above them.
+
+### 8.2 Rationale
+
+The protocol-level SensorObject interface defined in §7.2 is, in
+substance, a vtable. Writing it manually as a C struct-of-function-
+pointers (as shown for spec clarity) doubles the boilerplate of every
+new driver. Expressing it as a C++ class with virtual methods is
+shorter, type-safe, and produces *equivalent* machine code at `-Os`.
+
+The toolchain support is universal across our target MCU families:
+
+| PHY MCU | Vendor SDK | C++ toolchain | C++17 support |
 |---|---|---|---|
-| DISCRETE event | Door, motion, leak | BTHome v2 advert + Tier 1.5 ACK | BTHome v2 / Zigbee cluster |
-| DISCRETE sample (slow-changing) | Temp, humidity | BTHome v2 advert | MQTT JSON / Zigbee cluster |
-| STREAMING | Audio, video, vibration FFT | *Not supported* (BLE bandwidth too low) | MQTT binary frame |
+| STM32WB09 (BLE) | STM32CubeWB0 | `arm-none-eabi-g++` 14.x | ✅ Full |
+| ESP32 (Wi-Fi) | ESP-IDF 5.x | `xtensa-esp32-elf-g++` | ✅ Full (IDF uses C++ internally) |
+| EFR32MG24 (Zigbee) | Simplicity SDK | `arm-none-eabi-g++` | ✅ Full |
+| STM32WLE5 (LoRa) | STM32CubeWL | `arm-none-eabi-g++` 14.x | ✅ Full |
 
-The BLE m/b SKU does **not** support streaming categories at all in
-v1.0; an extension declaring `STREAMING` category boots into "wrong
-PHY for this extension" error state with a clear LED + HA notification.
-This is enforced statically at ID-resistor parse time — the BLE m/b's
-firmware build does not even include drivers for streaming extension
-IDs (slots 7–9 in §5.4).
+No target on the roadmap is C-only. Should that change in the future
+(e.g. cost-down to an AVR or PIC for a single-button extension), that
+extension's local driver can stay in C and link against the C++
+framework via `extern "C"` — interop is one-directional but
+straightforward.
 
-The Wi-Fi m/b SKU supports both DISCRETE and STREAMING categories. The
-Zigbee m/b SKU supports DISCRETE only (Zigbee bandwidth makes
-streaming infeasible). LoRa m/b SKU supports DISCRETE only and only
-the slow-changing subset (event-rate cap imposed by LoRa duty cycle
-regulations).
+### 8.3 Coding-standard implications
 
-## 9. Versioning and change control
+- **Class hierarchy**: shallow. One abstract base (`SensorObject`),
+  one concrete subclass per extension driver. No deeper hierarchies
+  unless an extension explicitly shares partial implementation with
+  another (rare; usually compose rather than inherit).
+- **Memory**: every dynamic-sized resource has a documented maximum.
+  Pool allocators with compile-time-fixed pool sizes preferred over
+  any runtime allocator.
+- **Error handling**: return values, not exceptions. Use
+  `etl::expected<T, error_t>` or a similar Rust-style sum type for
+  fallible operations.
+- **Logging**: lightweight, format-string compile-time-checked
+  (e.g. `fmt::format` or a similar header-only library) so that
+  unused log statements compile away cleanly.
 
-- This spec starts at **v0.1 (DRAFT)**. No backward-compatibility
-  guarantees while pre-1.0.
+### 8.4 Migration of existing code
+
+The current single-purpose `homesensors/firmware` is C. It works and
+will not be rewritten as part of this modular framework — it stays
+on the v0.x "monolithic firmware" track for the existing door sensor.
+
+The new modular framework is a parallel codebase under a new firmware
+repo (likely `homesensors/framework` or kept in `homesensors/firmware`
+under a `framework/` subdirectory, decided at v1.0 cutover). The
+existing door-sensor logic will be ported to a `door_contact` driver
+class in the new framework as part of the first integration test.
+
+## 9. Upstream protocol matrix
+
+| Sensor category | Examples | Protocol over BLE m/b | Protocol over Wi-Fi m/b | Over Zigbee m/b | Over LoRa m/b |
+|---|---|---|---|---|---|
+| DISCRETE event | Door, motion, leak, fire | BTHome v2 advert + Tier 1.5 ACK | MQTT JSON or BTHome v2 | Zigbee cluster | LoRaWAN unconfirmed uplink |
+| DISCRETE / BATCH sample (small) | Temp/humidity 1-byte readings | BTHome v2 advert | MQTT JSON | Zigbee cluster | LoRaWAN unconfirmed |
+| BATCH frame (medium) | FFT 16-bin summary, power-meter sample, multi-channel temp | BTHome v2 advert (if ≤ 21 byte payload) or *unsupported* | MQTT binary | Zigbee binary frame cluster | LoRaWAN (rate-limited per regional duty cycle) |
+| STREAMING | Audio PCM, video, raw IMU | *unsupported* — extension rejected at boot | MQTT binary frame | *unsupported* | *unsupported* |
+
+The "*unsupported*" cells are enforced **statically at compile time**:
+the BLE m/b firmware build does not link the audio_stream /
+video_stream drivers at all, so an extension declaring those ID slots
+hits the EXTENSION_UNKNOWN branch at boot and signals an error.
+Static refusal beats runtime detection — the deployed firmware can't
+encounter a sensor it doesn't have driver code for.
+
+Region-specific rate limiting for LoRa (EU 868 1 % duty cycle, US
+915 dwell-time limits, etc.) is enforced by the LoRa upstream adapter,
+not by the SensorObject driver. Drivers publish at their natural rate;
+the adapter back-pressures or coalesces as needed and may drop frames
+if the cap is reached. Drivers will see a return value from
+`publish()` indicating drop count for monitoring.
+
+## 10. Versioning and change control
+
+- This spec starts at **v0.1 (DRAFT)**, currently advancing to
+  DRAFT 0.2. No backward-compatibility guarantees while pre-1.0.
 - The first hardware fab matching this spec will pin a `v1.0` tag.
   After v1.0:
   - Connector pinout MUST NOT change in a way that breaks existing
@@ -573,30 +770,30 @@ regulations).
   re-defining wake-up direction) require a major version bump and
   carry an explicit migration note.
 
-## 10. Open questions for v0.2 → v1.0
+## 11. Open questions
 
-1. **Extension power gating.** Should the m/b have a load switch on
-   the extension power rail to cut quiescent draw for ultra-low-power
-   deployments? §3.4.
-2. **Buck-boost part selection.** TPS63802 vs TPS63900 vs an
-   alternative — pick after first PHY-MCU power budget is measured.
-3. **Compact form factor confirmation.** JST-SH 1×8 is the proposal;
-   bench-prototype one door-magnet extension on both mikroBUS and
-   JST-SH before committing.
-4. **Sensor category enum granularity.** `DISCRETE` vs `STREAMING`
-   may need a third category for low-bandwidth periodic streams
-   (e.g. once-per-second temperature) that don't fit either model
-   cleanly. Bring-up will tell.
-5. **Multi-extension carrier.** Defer to v2.0, but capture any
-   pinout decisions now that would foreclose a future 2-socket
-   carrier board.
-6. **Provisioning UX.** When the user plugs in an extension, how does
+Items resolved during the DRAFT 0.1 → 0.2 redline pass have been
+moved into the body of the spec. Remaining open items:
+
+1. **Buck-boost-B part selection.** Specific PN for footprint B
+   (wide-input buck-boost) — bench-compare LT8390, LM5176,
+   MAX17242 etc. against a real PHY-MCU + extension load profile
+   for the worst-case 6S → 3.3 V scenario before BOM-locking.
+2. **Compact form factor bench validation.** JST-SH 1×8 is
+   specified (§4.1) but not yet bench-prototyped. Build one
+   door-magnet extension on JST-SH alongside the mikroBUS variant
+   before committing both form factors to fab.
+3. **Multi-extension carrier** (v2 deferral). Capture any pinout
+   decisions now that would foreclose a future 2-socket carrier
+   board. Currently we don't see any, but worth one explicit review
+   before v1.0 lock.
+4. **Provisioning UX.** When a user plugs in an extension, how does
    HA learn what it is without firmware rebuild? The static-config
-   default means firmware rebuild is required. An OTA-flashable
-   "extension table" stored in flash could decouple this — out of
-   scope for v1.0 but flagged for v1.x.
+   default means firmware rebuild is required to support a new
+   extension type. An OTA-flashable "extension table" in flash
+   could decouple this — out of scope for v1.0 but flagged for v1.x.
 
-## 11. Glossary
+## 12. Glossary
 
 | Term | Meaning |
 |---|---|
@@ -604,6 +801,8 @@ regulations).
 | Extension | The PCB carrying one or more sensors (or a companion MCU + sensors). Plugs into the m/b's socket. |
 | PHY | The radio standard the m/b speaks upstream: BLE / Wi-Fi / Zigbee / LoRa. |
 | SensorObject | Firmware-side abstraction implemented by each extension driver. §7.2. |
-| Discrete event | A state-change observation (door opens, leak detected). Small payload, low rate. |
-| Streaming | Continuous time-series or frame-series data. High bandwidth, requires SPI or UART link. |
+| DISCRETE | Sensor category: small, sporadic, event-driven (door, leak). |
+| BATCH | Sensor category: medium-size periodic frames (FFT summary, multi-channel sample). |
+| STREAMING | Sensor category: continuous frame series at high rate (audio, video). |
 | Static configuration | Firmware build is locked to a specific extension type at compile time; the resistor ID is a defence-in-depth check. |
+| ETL | Embedded Template Library (`www.etlcpp.com`) — header-only embedded-friendly STL replacement used by the framework. |
