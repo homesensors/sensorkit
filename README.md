@@ -10,8 +10,19 @@
 > variants planned. Goal: a workable smart home in minutes, without
 > professional installation.
 
-<!-- TODO: hero image of the soldered board + CR2032 + HA dashboard -->
-<!-- ![sensorkit hero](docs/images/hero.jpg) -->
+![sensorkit hero](docs/images/hero.jpeg)
+
+> *Rev A prototype shown. The visible yellow flying wire is the
+> hand-rework that landed the battery-divider midpoint on PB1 — see
+> [Hardware](https://github.com/homesensors/hardware) repo's `pcb-rev-b`
+> tag for the cleaned-up version that folds this fix into the PCB.*
+
+## Gallery
+
+| Side A | Side B |
+|---|---|
+| ![Side A on top of CR2032](docs/images/ble_door_sensor_sideA_CR2032.jpeg) | ![Side B](docs/images/ble_door_sensor_sideB_CR2032.jpeg) |
+| ![KiCad Side A render](docs/images/ble_door_sensor_sideA.png) | ![KiCad Side B render](docs/images/ble_door_sensor_sideB.png) |
 
 ## What's in this repo
 
