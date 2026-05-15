@@ -137,7 +137,7 @@ v0.1.0 release tag.
 - [`docs/ble-protocol.md`](docs/ble-protocol.md) — wire format for BTHome adverts + Tier 1.5 ACK
   protocol; complete enough to write a compatible client from scratch.
 - [`docs/modular-spec.md`](docs/modular-spec.md) — **DRAFT** specification for the modular
-  motherboard + extension architecture (multi-PHY, multi-sensor kit).
+  carrier board + extension architecture (multi-PHY, multi-sensor kit).
   Pre-1.0, subject to redline.
 - [`docs/build-guide.md`](docs/build-guide.md) — end-to-end build guide (KiCad → PCB fab →
   assembly → firmware flash → HA install). *Coming soon.*

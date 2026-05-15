@@ -16,9 +16,9 @@
 
 This document specifies the modular evolution of `sensorkit` from a
 single fixed-purpose door sensor into a kit-style platform supporting
-heterogeneous sensors over a small number of motherboard variants
+heterogeneous sensors over a small number of carrier board variants
 (BLE / Wi-Fi / Zigbee / LoRa). It defines the hardware contract
-(connector, power, signalling) between *motherboard* and *extension*,
+(connector, power, signalling) between *carrier board* and *extension*,
 and the firmware framework that makes a single source tree support
 many sensor types.
 
@@ -31,37 +31,39 @@ Cross-references between them are by stable section anchors.
 
 ### 1.1 In scope
 
-- A **motherboard (m/b)** PCB family, one PCB per PHY (BLE,
-  Wi-Fi, Zigbee, LoRa). All m/b variants share the same physical
+- A **carrier board** PCB family, one PCB per PHY (BLE,
+  Wi-Fi, Zigbee, LoRa). All carrier board variants share the same physical
   extension connector, the same firmware framework, and the same
   upstream protocol logic.
 - An **extension** PCB family, one per sensor type (or sensor
   cluster — multiple sensors on one extension is allowed).
   Extensions are PHY-agnostic — the same door-contact extension works
-  on a BLE m/b or a Zigbee m/b without modification.
+  on a BLE carrier board or a Zigbee carrier board without modification.
 - A **firmware framework** that abstracts sensor-specific drivers from
   PHY-specific stacks, so a new sensor type only requires a new driver
   + a one-line registration, not a full firmware fork.
 - An **upstream protocol matrix** that routes discrete events
   (door, motion), batched samples (temperature, humidity), and
   streaming data (audio, video, vibration FFT) onto the appropriate
-  transport for each m/b's PHY (BTHome v2 for BLE-friendly payloads,
+  transport for each carrier board's PHY (BTHome v2 for BLE-friendly payloads,
   MQTT for everything else).
 
 ### 1.2 Out of scope
 
 - **Programmable interconnect** between MCU pins and extension pins
   via on-board mux/switch. The connector pinout is fixed and pins
-  retain their mikroBUS roles across all m/b variants. Different
+  retain their mikroBUS roles across all carrier board variants. Different
   extensions plug into the same pins; pin function is statically
   bound to extension type via firmware config (see §5 ADR-3).
 - **Code generation tooling.** Firmware is hand-written C++ (see
   ADR-5 in §8) with framework support; no GUI / IDE plugin generates
   the firmware for a given assembly.
-- **Multiple extensions per motherboard.** Each m/b carries a single
-  extension socket in v1.0. A "carrier board" that fans one m/b
-  connector into multiple extension sockets is a possible v2 addition
-  but not specified here.
+- **Multiple extensions per carrier board.** Each carrier board has a
+  single extension socket in v1.0. An **expansion hub** (a passive
+  fan-out board that plugs into one carrier-board socket and exposes
+  multiple downstream sockets for extensions) is a possible v2
+  addition but not specified here. The "expansion hub" name avoids
+  reusing "carrier board" for a different role.
 - **Self-describing extensions over a service protocol.** Discovery is
   a single ADC reading (§5 ADR-3), not an I2C handshake or EEPROM
   read. Bidirectional service-channel protocols are a possible v2
@@ -70,8 +72,8 @@ Cross-references between them are by stable section anchors.
 ### 1.3 Design principles
 
 1. **Wireless first.** Wired uplink (USB/Ethernet) is supported only
-   for stationary, mains-powered m/b configurations as a secondary use
-   case. The BLE m/b is the canonical reference design.
+   for stationary, mains-powered carrier board configurations as a secondary use
+   case. The BLE carrier board is the canonical reference design.
 2. **Single firmware tree.** All PHY variants and all sensor types
    build from one Git repository. PHY-specific code lives below a HAL
    line; sensor-specific code lives above a SensorObject interface
@@ -88,7 +90,7 @@ Cross-references between them are by stable section anchors.
 
 ```
    ┌──────────────────────────────────────────────────────────────┐
-   │                     MOTHERBOARD                               │
+   │                     CARRIER BOARD                             │
    │                                                               │
    │   Power input options (one populated per SKU):                │
    │   - CR2032 (2.0-3.0 V)         ──┐                            │
@@ -122,7 +124,7 @@ Cross-references between them are by stable section anchors.
    ┌──────────────────────────────────────────────────────────────┐
    │                     EXTENSION (one of N)                      │
    │                                                               │
-   │   Power: 3V3 and/or VIN_RAW from m/b. Extension owns any      │
+   │   Power: 3V3 and/or VIN_RAW from carrier board. Extension owns any      │
    │   further regulation (LDO, boost, buck) it needs.             │
    │                                                               │
    │   ┌──────────────────────────────────────────────┐            │
@@ -134,9 +136,9 @@ Cross-references between them are by stable section anchors.
    │   ┌──────────────────────────────────────────────┐            │
    │   │ Smart extension (audio, video, FFT, NN):     │            │
    │   │   companion MCU + multiple sensors           │            │
-   │   │   companion MCU ↔ m/b over SPI or UART       │            │
+   │   │   companion MCU ↔ carrier board over SPI or UART       │            │
    │   │   edge processing on companion MCU           │            │
-   │   │   m/b only sees pre-processed frames         │            │
+   │   │   carrier board only sees pre-processed frames         │            │
    │   └──────────────────────────────────────────────┘            │
    └──────────────────────────────────────────────────────────────┘
 ```
@@ -145,7 +147,7 @@ Cross-references between them are by stable section anchors.
 
 ### 3.1 Decision
 
-The motherboard supports **any power input from 2.0 V to 24 V** on the
+The carrier board supports **any power input from 2.0 V to 24 V** on the
 `VIN_RAW` rail, via **two regulator footprints on the same PCB** —
 exactly one is populated per assembled SKU:
 
@@ -156,7 +158,7 @@ exactly one is populated per assembled SKU:
 
 Both footprints sit on the same PCB tracks; the unpopulated footprint's
 pads are simply left bare on the assembly. Output of either regulator
-ties into the same `3V3_BUS` net. This way **the m/b PCB is a single
+ties into the same `3V3_BUS` net. This way **the carrier board PCB is a single
 SKU at fab time**; the battery vs. mains distinction is solely a
 stuffing-list choice.
 
@@ -179,7 +181,7 @@ spec. The wide buck-boost footprint must tolerate brief transients up
 to 30 V (and we should pick parts accordingly), but extensions plugged
 into `VIN_RAW` should be designed assuming 24 V worst-case typical.
 
-Only one input option is populated per assembled motherboard SKU
+Only one input option is populated per assembled carrier board SKU
 (through-hole CR2032 socket, USB-C connector, or DC barrel jack —
 mutually exclusive). The selected input feeds `VIN_RAW` through an
 ideal-OR diode controller (or a simple Schottky OR for cost-down
@@ -214,27 +216,27 @@ regulator silicon optimal for its power-source class.
 | Pin | Voltage | Max current draw by extension | Notes |
 |---|---|---|---|
 | `3V3` | 3.3 V ±2 % | 100 mA continuous, 300 mA peak | Regulated. Quiet enough for ADC reference. |
-| `VIN_RAW` | 2.0–24 V (depends on m/b input population) | 500 mA continuous | Unregulated. Extension owns its further regulation if it needs 5 V or other. |
-| `5V` (mikroBUS pin 10) | **Tied to VIN_RAW**, NOT a separate 5 V rail | — | Standard mikroBUS extensions expecting clean 5 V will work *only* on USB-powered m/b assemblies. Documented per-extension. |
+| `VIN_RAW` | 2.0–24 V (depends on carrier board input population) | 500 mA continuous | Unregulated. Extension owns its further regulation if it needs 5 V or other. |
+| `5V` (mikroBUS pin 10) | **Tied to VIN_RAW**, NOT a separate 5 V rail | — | Standard mikroBUS extensions expecting clean 5 V will work *only* on USB-powered carrier board assemblies. Documented per-extension. |
 
 The "5V" label on mikroBUS pin 10 is preserved for ecosystem
 compatibility with off-the-shelf Click boards designed for USB-host
-m/bs, but documented to track VIN_RAW on homesensors m/bs.
+carrier boards, but documented to track VIN_RAW on homesensors carrier boards.
 
 ### 3.4 Extension power management
 
-**The extension owns its power management.** The m/b does not gate the
+**The extension owns its power management.** The carrier board does not gate the
 extension's supply at any sub-second granularity — there is no
-load-switch on the `3V3` or `VIN_RAW` rails leaving the m/b. If an
+load-switch on the `3V3` or `VIN_RAW` rails leaving the carrier board. If an
 extension needs to power down sub-components between samples (e.g.
 the analog front-end of a battery-budget temperature sensor), the
 extension provides its own load switch driven by its own logic.
 
 **Compile-time validation:** the firmware framework knows the
-configured power class of the m/b (`battery_LP`, `battery_LiIon`,
+configured power class of the carrier board (`battery_LP`, `battery_LiIon`,
 `mains_USB`, `mains_DC`) and the worst-case current draw declared by
 each extension driver. Combinations that violate the budget — e.g.
-configuring a video-stream extension on a CR2032 m/b — cause a
+configuring a video-stream extension on a CR2032 carrier board — cause a
 compile-time error, not a silent runtime failure. The error is
 explicit ("extension `video_stream` declares 80 mA continuous, exceeds
 `battery_LP` budget of 0.5 mA").
@@ -247,7 +249,7 @@ that the deployed device must perform on every boot.
 
 ### 4.1 Decision
 
-The motherboard carries a **mikroBUS-compatible** female socket
+The carrier board exposes a **mikroBUS-compatible** female socket
 (2×8 pin, 2.54 mm pitch). Extensions present a 2×8 male header in the
 same physical configuration. Pinout follows the mikroBUS Standard
 v2.00 exactly:
@@ -287,7 +289,7 @@ intended for I2C-only or single-GPIO-only extensions.
 
 **Firmware does not distinguish between the two physical connectors** —
 the same pin numbers (`SDA`, `INT`, etc.) map to the same MCU pins
-on both. Only the mechanical bring-out differs. A m/b SKU exposes
+on both. Only the mechanical bring-out differs. A carrier board SKU exposes
 exactly one of the two connectors; both are not co-populated.
 
 ### 4.2 Rationale
@@ -297,7 +299,7 @@ exactly one of the two connectors; both are not co-populated.
   plus two interrupt lines and two power rails. Different extensions
   populate different pins without renegotiating the contract.
 - The ecosystem benefit is significant: ~1500 existing MikroElektronika
-  Click boards will physically plug into homesensors m/b sockets and
+  Click boards will physically plug into homesensors carrier board sockets and
   often work with minor firmware support, even outside our intentional
   extension catalogue. This dramatically lowers the bar for sensor
   experimentation.
@@ -331,10 +333,10 @@ with another extension type using those pins.
 
 ### 4.4 Mechanical orientation
 
-Per mikroBUS spec §3.3: the motherboard carries the **female** socket
+Per mikroBUS spec §3.3: the carrier board mounts the **female** socket
 on the top side; the extension carries the **male** header on the
 bottom side; extensions mount with components facing up (away from
-m/b).
+carrier board).
 
 For low-profile assemblies, surface-mount mezzanine sockets such as
 the Würth Elektronik **WR-MM** family (e.g. 692121710002 and related
@@ -356,14 +358,14 @@ Functionally-equivalent alternatives include Samtec SSW-108-01-T-D
 ### 5.1 Decision
 
 Each extension carries **a single resistor** (1 %) from the AN pin to
-GND. The motherboard carries a fixed pull-up resistor from AN to 3V3.
-On boot, the m/b ADC reads the AN voltage and decodes the extension
+GND. The carrier board has a fixed pull-up resistor from AN to 3V3.
+On boot, the carrier board ADC reads the AN voltage and decodes the extension
 type from a small lookup table.
 
 ```
         3V3
          │
-       [R_pu] ← on motherboard, fixed 33 kΩ
+       [R_pu] ← on carrier board, fixed 33 kΩ
          │
          ├──── AN pin ──── ADC input
          │
@@ -381,7 +383,7 @@ The combination "default static config + cheap auto-discovery" is the
 right MVP. Reasons:
 
 - Static config alone fails if the user plugs in the wrong extension —
-  the m/b silently malfunctions, support burden is high.
+  the carrier board silently malfunctions, support burden is high.
 - Full bidirectional protocol (I2C EEPROM with descriptor, GATT-style
   capability exchange, etc.) is an order of magnitude more firmware
   effort and adds ~$0.10 BOM per extension for the EEPROM IC.
@@ -416,7 +418,7 @@ void boot(void) {
     extension_id_t id = extension_detect();
     if (id == EXTENSION_UNKNOWN) {
         led_set_pattern(LED_RED_SLOW_BLINK);
-        // Continue running with no sensor — m/b reports
+        // Continue running with no sensor — carrier board reports
         // "unknown extension" upstream so HA shows a clear error.
     } else if (id != configured_extension_id) {
         led_set_pattern(LED_RED_FAST_BLINK);
@@ -470,13 +472,13 @@ required), with the EEPROM holding the richer data.
 
 ### 6.1 Decision
 
-The mikroBUS `INT` pin (pin 15) is the canonical **extension → m/b
+The mikroBUS `INT` pin (pin 15) is the canonical **extension → carrier board
 wake-up channel**, edge-triggered (configurable rising or falling per
-extension). The m/b configures EXTI on this pin to wake from STOP mode
+extension). The carrier board configures EXTI on this pin to wake from STOP mode
 on the relevant edge.
 
-The mikroBUS `RST` pin (pin 2) is the canonical **m/b → extension
-reset signal**, active-low. The m/b drives this pin low for ≥10 ms to
+The mikroBUS `RST` pin (pin 2) is the canonical **carrier board → extension
+reset signal**, active-low. The carrier board drives this pin low for ≥10 ms to
 reset the extension's companion MCU (if any) or to reset the
 extension's analog front-end on boot.
 
@@ -488,16 +490,16 @@ extension owns its power management).
 ### 6.2 Rationale
 
 - Most homesensors use cases are event-driven from the sensor side:
-  door opens → wake m/b → emit event. `INT` is exactly the right
+  door opens → wake carrier board → emit event. `INT` is exactly the right
   pin for this in the mikroBUS standard.
-- Bidirectional wake-up (m/b waking extension) is rarely needed
+- Bidirectional wake-up (carrier board waking extension) is rarely needed
   because extensions with companion MCUs run in their own LPM and
   wake themselves on their own internal sensors. They communicate
-  with the m/b only when they have data to push.
+  with the carrier board only when they have data to push.
 
 ### 6.3 EXTI configuration
 
-The m/b firmware framework MUST register the INT pin as an
+The carrier board firmware framework MUST register the INT pin as an
 EXTI-capable wake-up source whenever an extension driver is loaded.
 Drivers declare their preferred edge as part of their `SensorObject`
 registration (see §7.2).
@@ -643,11 +645,11 @@ Three categories cover the full range of payload sizes and rates:
 
 Driver declares its category at registration time. The framework's
 upstream adapter uses the category to choose transport (§9). The
-m/b's PHY may statically refuse certain categories at compile time
-(e.g. BLE m/b rejects STREAMING — see §9).
+carrier board's PHY may statically refuse certain categories at compile time
+(e.g. BLE carrier board rejects STREAMING — see §9).
 
 DISCRETE and BATCH can both publish via the BTHome transport on BLE
-m/bs. BATCH adverts are larger (a full advert per sample, up to the
+carrier boards. BATCH adverts are larger (a full advert per sample, up to the
 31-byte legacy cap) and fire less often than the rate suggests — the
 framework collects multiple values into one advert where possible.
 
@@ -733,7 +735,7 @@ class in the new framework as part of the first integration test.
 
 ## 9. Upstream protocol matrix
 
-| Sensor category | Examples | Protocol over BLE m/b | Protocol over Wi-Fi m/b | Over Zigbee m/b | Over LoRa m/b |
+| Sensor category | Examples | Protocol over BLE carrier board | Protocol over Wi-Fi carrier board | Over Zigbee carrier board | Over LoRa carrier board |
 |---|---|---|---|---|---|
 | DISCRETE event | Door, motion, leak, fire | BTHome v2 advert + Tier 1.5 ACK | MQTT JSON or BTHome v2 | Zigbee cluster | LoRaWAN unconfirmed uplink |
 | DISCRETE / BATCH sample (small) | Temp/humidity 1-byte readings | BTHome v2 advert | MQTT JSON | Zigbee cluster | LoRaWAN unconfirmed |
@@ -741,7 +743,7 @@ class in the new framework as part of the first integration test.
 | STREAMING | Audio PCM, video, raw IMU | *unsupported* — extension rejected at boot | MQTT binary frame | *unsupported* | *unsupported* |
 
 The "*unsupported*" cells are enforced **statically at compile time**:
-the BLE m/b firmware build does not link the audio_stream /
+the BLE carrier board firmware build does not link the audio_stream /
 video_stream drivers at all, so an extension declaring those ID slots
 hits the EXTENSION_UNKNOWN branch at boot and signals an error.
 Static refusal beats runtime detection — the deployed firmware can't
@@ -797,9 +799,9 @@ moved into the body of the spec. Remaining open items:
 
 | Term | Meaning |
 |---|---|
-| Motherboard (m/b) | The PCB carrying the PHY MCU, power input, and extension socket. One PCB per PHY family. |
-| Extension | The PCB carrying one or more sensors (or a companion MCU + sensors). Plugs into the m/b's socket. |
-| PHY | The radio standard the m/b speaks upstream: BLE / Wi-Fi / Zigbee / LoRa. |
+| Carrier board | The PCB carrying the PHY MCU, power input, and extension socket. One PCB per PHY family. |
+| Extension | The PCB carrying one or more sensors (or a companion MCU + sensors). Plugs into the carrier board's socket. |
+| PHY | The radio standard the carrier board speaks upstream: BLE / Wi-Fi / Zigbee / LoRa. |
 | SensorObject | Firmware-side abstraction implemented by each extension driver. §7.2. |
 | DISCRETE | Sensor category: small, sporadic, event-driven (door, leak). |
 | BATCH | Sensor category: medium-size periodic frames (FFT summary, multi-channel sample). |
