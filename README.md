@@ -19,10 +19,23 @@
 
 ## Gallery
 
+### Hardware
+
 | Side A | Side B |
 |---|---|
-| ![Side A on top of CR2032](docs/images/ble_door_sensor_sideA_CR2032.jpeg) | ![Side B](docs/images/ble_door_sensor_sideB_CR2032.jpeg) |
+| ![Side A on top of CR2032](docs/images/ble_door_sensor_sideA_CR2032.jpeg) | ![Side B on top of CR2032](docs/images/ble_door_sensor_sideB_CR2032.jpeg) |
 | ![KiCad Side A render](docs/images/ble_door_sensor_sideA.png) | ![KiCad Side B render](docs/images/ble_door_sensor_sideB.png) |
+
+### Home Assistant integration
+
+| HA device view | HA dashboard |
+|---|---|
+| ![HA device view](docs/images/HA_DMon_device.png) | ![HA dashboard](docs/images/HA_DMon_sensor_dashboard.png) |
+
+Auto-discovered by HA's built-in BTHome integration as soon as the
+device fires its first advert. The
+[`door_ack_daemon`](https://github.com/homesensors/homeassist) add-on
+then closes the loop with Tier 1.5 ACKs over BLE.
 
 ## What's in this repo
 
